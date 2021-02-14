@@ -25,7 +25,7 @@ jobs:
         python -m pip install -U tox virtualenv
 
     - name: Install Lua ${{ matrix.lua-version }}
-      if: ${{ contains(matrix.lua-version, 'bundle' }}
+      if: ${{ contains(matrix.lua-version, 'bundle') }}
       run: sudo apt-get install lib${{ matrix.lua-version }}-dev
 
     - name: Test with tox
