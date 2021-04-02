@@ -1576,7 +1576,7 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
 
     f = <object>py_obj.obj
 
-    if not nargs:
+    if nargs == 0:
         lua.lua_settop(L, 0)  # FIXME
         result = f()
     else:
@@ -1607,8 +1607,10 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
             lua.lua_pop(L, 2)
 
         args = cpython.tuple.PyTuple_New(nargs)
-        cpython.ref.Py_INCREF(arg)
-        cpython.tuple.PyTuple_SET_ITEM(args, 0, arg)
+
+        if nargs > 0:
+            cpython.ref.Py_INCREF(arg)
+            cpython.tuple.PyTuple_SET_ITEM(args, 0, arg)
 
         for i in range(1, nargs):
             arg = py_from_lua(runtime, L, i+2)
