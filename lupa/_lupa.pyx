@@ -50,11 +50,6 @@ try:
 except ImportError:
     from collections import Mapping  # Py2
 
-try:
-    from sys import maxint
-except ImportError:
-    maxint = None
-
 cdef object wraps
 from functools import wraps
 
