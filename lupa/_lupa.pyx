@@ -65,6 +65,7 @@ except ImportError:
     import builtins
 
 DEF POBJECT = b"POBJECT" # as used by LunaticPython
+DEF LUPAKWARGS = b"LUPAKWARGS"
 
 cdef extern from *:
     """
@@ -492,10 +493,13 @@ cdef class LuaRuntime:
         luaL_openlib(L, NULL, py_object_lib, 0)
         lua.lua_pop(L, 1)
 
+        # create our Lupa keyword arguments metatable
+        lua.luaL_newmetatable(L, LUPAKWARGS)
+        lua.lua_pop(L, 1)
+
         # register global names in the module
         self.register_py_object(b'Py_None',  b'none', None)
         self.register_py_object(b'unpacks_lua_table', b'as_namedfunction', unpacks_lua_table)
-        self.register_py_object(b'unpacks_lua_table_method', b'as_namedmethod', unpacks_lua_table_method)
         if register_eval:
             self.register_py_object(b'eval', b'eval',
                 eval if self._new_internal_state else eval_main)
@@ -1566,6 +1570,7 @@ cdef int py_object_gc(lua_State* L) nogil:
 cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) except -1:
     cdef int i, nargs = lua.lua_gettop(L) - 1
     cdef tuple args
+    cdef dict kwargs
 
     f = <object>py_obj.obj
 
@@ -1587,6 +1592,22 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
             # so we just call the underlying function directly instead.
             f = <object>PyMethod_GET_FUNCTION(f)
 
+        if lua.lua_istable(L, nargs+1) and lua.lua_getmetatable(L, nargs+1):
+            lua.luaL_getmetatable(L, LUPAKWARGS)
+            if lua.lua_rawequal(L, -1, -2):
+                encoding = runtime._source_encoding
+                table = new_lua_table(runtime, L, nargs+1)
+                nargs -= 1
+                kwargs = {
+                    (<bytes>key).decode(encoding) if IS_PY2 and isinstance(key, bytes) else key : value
+                    for key, value in table.items()
+                }
+            else:
+                kwargs = {}
+            lua.lua_pop(L, 2)
+        else:
+            kwargs = {}
+
         args = cpython.tuple.PyTuple_New(nargs)
         cpython.ref.Py_INCREF(arg)
         cpython.tuple.PyTuple_SET_ITEM(args, 0, arg)
@@ -1597,7 +1618,7 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
             cpython.tuple.PyTuple_SET_ITEM(args, i, arg)
 
         lua.lua_settop(L, 0)  # FIXME
-        result = f(*args)
+        result = f(*args, **kwargs)
 
     return py_function_result_to_lua(runtime, L, result)
 
@@ -1908,6 +1929,15 @@ cdef int py_iter_next_with_gil(lua_State* L, py_object* py_iter) with gil:
         try: runtime.store_raised_exception(L, b'error while calling next(iterator)')
         finally: return -1
 
+# keyword argument support for Python objects in Lua
+
+cdef int py_kwargs(lua_State* L) nogil:
+    lua.luaL_checktype(L, 1, lua.LUA_TTABLE)
+    lua.lua_settop(L, 1)
+    lua.luaL_getmetatable(L, LUPAKWARGS)
+    lua.lua_setmetatable(L, 1)
+    return 1
+
 # 'python' module functions in Lua
 
 cdef lua.luaL_Reg *py_lib = [
@@ -1917,6 +1947,7 @@ cdef lua.luaL_Reg *py_lib = [
     lua.luaL_Reg(name = "iter",          func = <lua.lua_CFunction> py_iter),
     lua.luaL_Reg(name = "iterex",        func = <lua.lua_CFunction> py_iterex),
     lua.luaL_Reg(name = "enumerate",     func = <lua.lua_CFunction> py_enumerate),
+    lua.luaL_Reg(name = "kwargs",        func = <lua.lua_CFunction> py_kwargs),
     lua.luaL_Reg(name = NULL, func = NULL),
 ]
 
