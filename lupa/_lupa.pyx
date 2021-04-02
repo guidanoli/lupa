@@ -1569,8 +1569,10 @@ cdef int py_object_gc(lua_State* L) nogil:
 
 cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) except -1:
     cdef int i, nargs = lua.lua_gettop(L) - 1
+    cdef _LuaTable table
+    cdef bytes encoding
     cdef tuple args
-    cdef dict kwargs
+    cdef dict kwargs = None
 
     f = <object>py_obj.obj
 
@@ -1602,11 +1604,7 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
                     (<bytes>key).decode(encoding) if IS_PY2 and isinstance(key, bytes) else key : value
                     for key, value in table.items()
                 }
-            else:
-                kwargs = {}
             lua.lua_pop(L, 2)
-        else:
-            kwargs = {}
 
         args = cpython.tuple.PyTuple_New(nargs)
         cpython.ref.Py_INCREF(arg)
@@ -1618,7 +1616,11 @@ cdef bint call_python(LuaRuntime runtime, lua_State *L, py_object* py_obj) excep
             cpython.tuple.PyTuple_SET_ITEM(args, i, arg)
 
         lua.lua_settop(L, 0)  # FIXME
-        result = f(*args, **kwargs)
+
+        if kwargs:
+            result = f(*args, **kwargs)
+        else:
+            result = f(*args)
 
     return py_function_result_to_lua(runtime, L, result)
 
