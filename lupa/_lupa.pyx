@@ -21,6 +21,7 @@ from cpython.method cimport (
     PyMethod_Check, PyMethod_GET_SELF, PyMethod_GET_FUNCTION)
 from cpython.version cimport PY_MAJOR_VERSION
 from cpython.bytes cimport PyBytes_FromFormat
+from cpython.pycapsule cimport PyCapsule_IsValid, PyCapsule_GetPointer
 
 #from libc.stdint cimport uintptr_t
 cdef extern from *:
@@ -41,6 +42,7 @@ cdef extern from *:
 
 cdef object exc_info
 from sys import exc_info
+from traceback import format_exception
 
 cdef object Mapping
 try:
@@ -132,6 +134,18 @@ def lua_type(obj):
         lua.lua_settop(L, old_top)
         unlock_runtime(lua_object._runtime)
 
+def eval_main(string):
+    import __main__
+    d = __main__.__dict__
+    return eval(string, d)
+
+def exec_wrapper(string, g=None, l=None):
+    exec(string, g, l)
+
+def exec_main(string):
+    import __main__
+    d = __main__.__dict__
+    exec(string, d)
 
 @cython.no_gc_clear
 cdef class LuaRuntime:
@@ -173,6 +187,11 @@ cdef class LuaRuntime:
       from the builtins.  Use an ``attribute_filter`` function for that.
       (default: True)
 
+    * ``register_exec``: should Python's ``exec()`` function be available
+      to Lua code as ``python.exec()``?  Note that this does not remove it
+      from the builtins.  Use an ``attribute_filter`` function for that.
+      (default: True)
+
     * ``register_builtins``: should Python's builtins be available to Lua
       code as ``python.builtins.*``?  Note that this does not prevent access
       to the globals available as special Python function attributes, for
@@ -185,6 +204,9 @@ cdef class LuaRuntime:
       ``a == (1,2,3), b == nil, c == nil``?  ``unpack_returned_tuples=True``
       gives the former.
       (default: False, new in Lupa 0.21)
+
+    * ``state``: existing Lua state, encapsuled as "lua_State"
+      (default: None, creates new state internally)
 
     Example usage::
 
@@ -210,14 +232,24 @@ cdef class LuaRuntime:
     cdef object _attribute_getter
     cdef object _attribute_setter
     cdef bint _unpack_returned_tuples
+    cdef bint _new_internal_state
 
     def __cinit__(self, encoding='UTF-8', source_encoding=None,
                   attribute_filter=None, attribute_handlers=None,
                   bint register_eval=True, bint unpack_returned_tuples=False,
-                  bint register_builtins=True):
-        cdef lua_State* L = lua.luaL_newstate()
-        if L is NULL:
-            raise LuaError("Failed to initialise Lua runtime")
+                  bint register_builtins=True, bint register_exec=True, object state=None):
+        cdef lua_State* L
+        cdef const char *capsule_name = "lua_State"
+        if state is None:
+            self._new_internal_state = True
+            L = lua.luaL_newstate()
+            if L is NULL:
+                raise LuaError("Failed to initialise Lua runtime")
+        else:
+            self._new_internal_state = False
+            if not PyCapsule_IsValid(state, capsule_name):
+                raise ValueError("Invalid pointer to Lua state")
+            L = <lua_State*> PyCapsule_GetPointer(state, capsule_name)
         self._state = L
         self._lock = FastRLock()
         self._pyrefs_in_lua = {}
@@ -244,14 +276,19 @@ cdef class LuaRuntime:
                 raise ValueError("attribute_filter and attribute_handlers are mutually exclusive")
             self._attribute_getter, self._attribute_setter = getter, setter
 
-        lua.luaL_openlibs(L)
-        self.init_python_lib(register_eval, register_builtins)
-        lua.lua_settop(L, 0)
-        lua.lua_atpanic(L, <lua.lua_CFunction>1)
+        if self._new_internal_state:
+            lua.luaL_openlibs(L)
+
+        self.init_python_lib(register_eval, register_exec, register_builtins)
+
+        if self._new_internal_state:
+            lua.lua_settop(L, 0)
+            lua.lua_atpanic(L, <lua.lua_CFunction>1)
 
     def __dealloc__(self):
         if self._state is not NULL:
-            lua.lua_close(self._state)
+            if self._new_internal_state:
+                lua.lua_close(self._state)
             self._state = NULL
 
     @property
@@ -286,7 +323,10 @@ cdef class LuaRuntime:
     cdef int store_raised_exception(self, lua_State* L, bytes lua_error_msg) except -1:
         try:
             self._raised_exception = tuple(exc_info())
-            py_to_lua(self, L, self._raised_exception[1])
+            if self._new_internal_state:
+                py_to_lua(self, L, self._raised_exception[1])
+            else:
+                py_to_lua(self, L, "".join(format_exception(*self._raised_exception)))
         except:
             lua.lua_pushlstring(L, lua_error_msg, len(lua_error_msg))
             raise
@@ -437,11 +477,17 @@ cdef class LuaRuntime:
         return 0
 
     @cython.final
-    cdef int init_python_lib(self, bint register_eval, bint register_builtins) except -1:
+    cdef int init_python_lib(self, bint register_eval, bint register_exec, bint register_builtins) except -1:
         cdef lua_State *L = self._state
 
-        # create 'python' lib and register our own object metatable
-        luaL_openlib(L, "python", py_lib, 0)
+        # create python lib
+        if self._new_internal_state:
+            luaL_openlib(L, "python", py_lib, 0)
+        else:
+            lua.lua_createtable(L, 0, libsize(py_lib))
+            luaL_setfuncs(L, py_lib, 0)
+
+        # create our own object metatable
         lua.luaL_newmetatable(L, POBJECT)
         luaL_openlib(L, NULL, py_object_lib, 0)
         lua.lua_pop(L, 1)
@@ -449,7 +495,11 @@ cdef class LuaRuntime:
         # register global names in the module
         self.register_py_object(b'Py_None',  b'none', None)
         if register_eval:
-            self.register_py_object(b'eval',     b'eval', eval)
+            self.register_py_object(b'eval', b'eval',
+                eval if self._new_internal_state else eval_main)
+        if register_exec:
+            self.register_py_object(b'exec', b'exec',
+                exec_wrapper if self._new_internal_state else exec_main)
         if register_builtins:
             self.register_py_object(b'builtins', b'builtins', builtins)
 
