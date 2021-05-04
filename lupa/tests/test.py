@@ -11,7 +11,7 @@ import gc
 
 import lupa
 
-IS_PYTHON3 = sys.version_info[0] >= 3
+IS_PYTHON2 = sys.version_info[0] < 3
 
 try:
     _next = next
@@ -19,8 +19,10 @@ except NameError:
     def _next(o):
         return o.next()
 
-unicode_type = type(IS_PYTHON3 and 'abc' or 'abc'.decode('ASCII'))
+unicode_type = type('abc'.decode('ASCII') if IS_PYTHON2 else 'abc')
 
+if IS_PYTHON2:
+    unittest.TestCase.assertRaisesRegex = unittest.TestCase.assertRaisesRegexp
 
 class SetupLuaRuntimeMixin(object):
     lua_runtime_kwargs = {}
@@ -118,11 +120,11 @@ class TestLuaRuntime(SetupLuaRuntimeMixin, unittest.TestCase):
         try:
             self.lua.eval('require "UNKNOWNöMODULEäNAME"')
         except lupa.LuaError:
-            error = (IS_PYTHON3 and '%s' or '%s'.decode('ASCII')) % sys.exc_info()[1]
+            error = ('%s'.decode('ASCII') if IS_PYTHON2 else '%s') % sys.exc_info()[1]
         else:
             self.fail('expected error not raised')
         expected_message = 'module \'UNKNOWNöMODULEäNAME\' not found'
-        if not IS_PYTHON3:
+        if IS_PYTHON2:
             expected_message = expected_message.decode('UTF-8')
         self.assertTrue(expected_message in error,
                         '"%s" not found in "%s"' % (expected_message, error))
@@ -1662,7 +1664,7 @@ class TestLuaRuntimeEncoding(unittest.TestCase):
         gc.collect()
 
     test_string = '"abcüöä"'
-    if not IS_PYTHON3:
+    if IS_PYTHON2:
         test_string = test_string.decode('UTF-8')
 
     def _encoding_test(self, encoding, expected_length):
@@ -1923,10 +1925,10 @@ class TestThreading(unittest.TestCase):
         # plausability checks - make sure it's not all white or all black
         self.assertEqual('\0'.encode('ASCII')*(image_size//8//2),
                          result_bytes[:image_size//8//2])
-        if IS_PYTHON3:
-            self.assertTrue('\xFF'.encode('ISO-8859-1') in result_bytes)
-        else:
+        if IS_PYTHON2:
             self.assertTrue('\xFF' in result_bytes)
+        else:
+            self.assertTrue('\xFF'.encode('ISO-8859-1') in result_bytes)
 
         # if we have PIL, check that it can read the image
         ## try:
@@ -2619,11 +2621,270 @@ class TestErrorStackTrace(unittest.TestCase):
         except lupa.LuaError as e:
             self.assertNotIn("stack traceback:", e.args[0])
 
+
+################################################################################
+# tests for keyword arguments
+
+class PythonArgumentsInLuaTest(SetupLuaRuntimeMixin, unittest.TestCase):
+
+    @staticmethod
+    def get_args(*args, **kwargs):
+        return args
+
+    @staticmethod
+    def get_kwargs(*args, **kwargs):
+        return kwargs
+
+    @staticmethod
+    def get_none(*args, **kwargs):
+        return None
+
+    def assertEqualInLua(self, a, b):
+        lua_type_a = lupa.lua_type(a)
+        lua_type_b = lupa.lua_type(b)
+        if lua_type_a and lua_type_b and lua_type_a == lua_type_b:
+            return self.lua.eval('function(a, b) return a == b end')(a, b)
+        return self.assertEqual(a, b)
+
+    def assertResult(self, txt, args, kwargs):
+        lua_func = self.lua.eval('function (f) return f(%s) end' % txt)
+
+        # FIXME: lupa._LuaObject.__eq__ might make this function simpler
+
+        obtained_args = lua_func(self.get_args)
+        self.assertEqual(len(obtained_args), len(args))
+        for a, b in zip(obtained_args, args):
+            self.assertEqualInLua(a, b)
+
+        obtained_kwargs = lua_func(self.get_kwargs)
+        self.assertEqual(len(obtained_kwargs), len(kwargs))
+        for key in kwargs:
+            self.assertEqualInLua(obtained_kwargs[key], kwargs[key])
+
+    def assertIncorrect(self, txt, error=TypeError, regex=''):
+        lua_func = self.lua.eval('function (f) return f(%s) end' % txt)
+        self.assertRaisesRegex(error, regex, lua_func, self.get_none)
+
+    def test_no_table(self):
+        self.assertIncorrect('python.args()', error=lupa.LuaError)
+
+    def test_no_args(self):
+        self.assertResult('python.args{}', (), {})
+
+    def test_all_types(self):
+        # Positional arguments
+        args = self.lua.eval('''
+        {
+            42,
+            false,
+            "spam",
+            function() end,
+            coroutine.create(function() end),
+            {1, 2, 3},
+            python.none,
+        }
+        ''')
+        self.lua.globals()['args'] = args
+        self.assertResult('python.args(args)', tuple(args[i+1] for i in range(len(args))), {})
+
+        # Keyword arguments
+        kwargs = self.lua.table()
+        self.lua.globals()['kwargs'] = kwargs
+        self.lua.execute('''
+            for _, v in ipairs(args) do
+                kwargs[type(v)] = v
+            end
+        ''')
+        self.assertResult('python.args(kwargs)', (), dict(kwargs.items()))
+
+        # Invalid parameter to python.args
+        for objtype in kwargs:
+            if objtype != 'table':
+                self.assertIncorrect('python.args(kwargs["%s"])' % objtype,
+                        error=lupa.LuaError, regex="bad argument #1 to 'args'")
+        
+        # Invalid table keys
+        self.assertIncorrect('python.args{[0] = true}', error=IndexError, regex='table index out of range')
+        self.assertIncorrect('python.args{[2] = true}', error=IndexError, regex='table index out of range')
+        self.assertIncorrect('python.args{[3.14] = true}', regex='table key is neither an integer nor a string')
+        for objtype in kwargs:
+            if objtype not in {'number', 'string'}:
+                self.assertIncorrect('python.args{[kwargs["%s"]] = true}' % objtype,
+                        regex='table key is neither an integer nor a string')
+ 
+    def test_kwargs_merge(self):
+        self.assertResult('python.args{1, a=1}, python.args{2}, python.args{}, python.args{b=2}', (1, 2), dict(a=1, b=2))
+
+    def test_kwargs_merge_conflict(self):
+        self.assertIncorrect('python.args{a=1}, python.args{a=2}', regex='multiple values')
+
+
+class PythonArgumentsInLuaMethodsTest(PythonArgumentsInLuaTest):
+
+    def get_args(self, *args, **kwargs):
+        return args
+
+    def get_kwargs(self, *args, **kwargs):
+        return kwargs
+
+    def get_none(self, *args, **kwargs):
+        return None
+
+    def test_self_arg(self):
+        self.lua.globals()['self'] = self
+        self.assertResult('python.args{self}', (), {})
+        self.assertResult('python.args{self, 1, a=2}', (1, ), dict(a=2))
+        self.assertIncorrect('python.args{self=self}', regex='multiple values')
+        self.assertIncorrect('python.args{self, self=self}', regex='multiple values')
+
+
+################################################################################
+# tests for table access error
+
+class TestTableAccessError(SetupLuaRuntimeMixin, unittest.TestCase):
+    def test_error_index_metamethod(self):
+        self.lua.execute('''
+        t = {}
+        called = 0
+        setmetatable(t, {__index = function()
+            called = called + 1
+            error('my error message')
+        end})
+        ''')
+        lua_t = self.lua.eval('t')
+        self.assertRaisesRegex(lupa.LuaError, 'my error message', lambda t, k: t[k], lua_t, 'k')
+        self.assertEqual(self.lua.eval('called'), 1)
+
+
+################################################################################
+# tests for handling overflow
+
+class TestOverflowMixin(SetupLuaRuntimeMixin):
+    maxinteger = lupa.LUA_MAXINTEGER    # maximum value for Lua integer
+    mininteger = lupa.LUA_MININTEGER    # minimum value for Lua integer
+    biginteger = (maxinteger + 1) << 1  # value too big to fit in a Lua integer
+    maxfloat = sys.float_info.max       # maximum value for Python float
+    bigfloat = int(maxfloat) * 2        # value too big to fit in Python float
+
+    assert biginteger <= maxfloat, "%d can't be cast to float" % biginteger
+
+    def setUp(self):
+        super(TestOverflowMixin, self).setUp()
+        self.lua_type = self.lua.eval('type')
+        self.lua_math_type = self.lua.eval('math.type')
+
+    def tearDown(self):
+        self.lua_type = None
+        self.lua_math_type = None
+        super(TestOverflowMixin, self).tearDown()
+
+    def test_no_overflow(self):
+        self.assertMathType(0, 'integer')
+        self.assertMathType(10, 'integer')
+        self.assertMathType(-10, 'integer')
+        self.assertMathType(self.maxinteger, 'integer')
+        self.assertMathType(self.mininteger, 'integer')
+        self.assertMathType(0.0, 'float')
+        self.assertMathType(-0.0, 'float')
+        self.assertMathType(10.0, 'float')
+        self.assertMathType(-10.0, 'float')
+        self.assertMathType(3.14, 'float')
+        self.assertMathType(-3.14, 'float')
+        self.assertMathType(self.maxfloat, 'float')
+        self.assertMathType(-self.maxfloat, 'float')
+
+    def assertMathType(self, number, math_type):
+        self.assertEqual(self.lua_type(number), 'number')
+        if self.lua_math_type is not None:
+            self.assertEqual(self.lua_math_type(number), math_type)
+
+
+class TestOverflowWithoutHandler(TestOverflowMixin, unittest.TestCase):
+    lua_runtime_kwargs = dict(overflow_handler=None)
+
+    def test_overflow(self):
+        self.assertRaises(OverflowError, self.assertMathType, self.biginteger, 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, int(self.maxfloat), 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'integer')
+
+
+class TestOverflowWithFloatHandler(TestOverflowMixin, unittest.TestCase):
+    lua_runtime_kwargs = dict(overflow_handler=float)
+
+    def test_overflow(self):
+        self.assertMathType(self.biginteger, 'float')
+        self.assertMathType(int(self.maxfloat), 'float')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'float')
+
+
+class TestOverflowWithObjectHandler(TestOverflowMixin, unittest.TestCase):
+    def test_overflow(self):
+        self.lua.execute('python.set_overflow_handler(function(o) return o end)')
+        self.assertEqual(self.lua.eval('type')(self.biginteger), 'userdata')
+
+
+class TestFloatOverflowHandlerInLua(TestOverflowMixin, unittest.TestCase):
+    def test_overflow(self):
+        self.lua.execute('python.set_overflow_handler(python.builtins.float)')
+        self.assertMathType(self.biginteger, 'float')
+        self.assertMathType(int(self.maxfloat), 'float')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'float')
+
+
+class TestBadOverflowHandlerInPython(unittest.TestCase):
+    def test_error(self):
+        self.assertRaises(ValueError, lupa.LuaRuntime, overflow_handler=123)
+
+
+class TestBadOverflowHandlerInLua(SetupLuaRuntimeMixin, unittest.TestCase):
+    def _test_set_overflow_handler(self, overflow_handler_code):
+        self.assertRaises(lupa.LuaError, self.lua.execute, 'python.set_overflow_handler(%s)' % overflow_handler_code)
+
+    def test_number(self):
+        self._test_set_overflow_handler('123')
+
+    def test_table(self):
+        self._test_set_overflow_handler('{}')
+
+    def test_boolean(self):
+        self._test_set_overflow_handler('true')
+        self._test_set_overflow_handler('false')
+
+    def test_string(self):
+        self._test_set_overflow_handler('"abc"')
+
+    def test_thread(self):
+        self._test_set_overflow_handler('coroutine.create(function() end)')
+
+
+class TestOverflowHandlerOverwrite(TestOverflowMixin, unittest.TestCase):
+    lua_runtime_kwargs = dict(overflow_handler=float)
+
+    def test_overwrite_in_lua(self):
+        self.lua.execute('python.set_overflow_handler(nil)')
+        self.assertRaises(OverflowError, self.assertMathType, self.biginteger, 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, int(self.maxfloat), 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'integer')
+        self.lua.set_overflow_handler(float)
+        self.assertMathType(self.biginteger, 'float')
+        self.assertMathType(int(self.maxfloat), 'float')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'float')
+
+    def test_overwrite_in_python(self):
+        self.lua.set_overflow_handler(None)
+        self.assertRaises(OverflowError, self.assertMathType, self.biginteger, 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, int(self.maxfloat), 'integer')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'integer')
+        self.lua.execute('python.set_overflow_handler(function(o) return python.builtins.float(o) end)')
+        self.assertMathType(self.biginteger, 'float')
+        self.assertMathType(int(self.maxfloat), 'float')
+        self.assertRaises(OverflowError, self.assertMathType, self.bigfloat, 'float')
+
+
 ################################################################################
 # tests for missing reference
 
 class TestMissingReference(SetupLuaRuntimeMixin, unittest.TestCase):
-
     def setUp(self):
         super(TestMissingReference, self).setUp()
         self.testmissingref = self.lua.eval('''
@@ -2649,6 +2910,10 @@ class TestMissingReference(SetupLuaRuntimeMixin, unittest.TestCase):
         end
         ''')
 
+    def tearDown(self):
+        self.testmissingref = None
+        super(TestMissingReference, self).tearDown()
+
     def test_fallbacks(self):
         class X():
             def __call__(self, *args):
@@ -2673,6 +2938,7 @@ class TestMissingReference(SetupLuaRuntimeMixin, unittest.TestCase):
         self.testmissingref({}, lupa.as_itemgetter) # item getter protocol
         self.testmissingref({}, lupa.as_attrgetter) # attribute getter protocol
 
+
 if __name__ == '__main__':
     def print_version():
         version = lupa.LuaRuntime().lua_implementation
@@ -2680,4 +2946,3 @@ if __name__ == '__main__':
 
     print_version()
     unittest.main()
-

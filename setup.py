@@ -116,23 +116,23 @@ def lua_libs(package='luajit'):
 basedir = os.path.abspath(os.path.dirname(__file__))
 
 def get_lua_build_from_arguments():
-    lua_l = get_option('--lua-l')
-    lua_I = get_option('--lua-I')
+    lua_lib = get_option('--lua-lib')
+    lua_includes = get_option('--lua-includes')
 
-    if not lua_l or not lua_I:
+    if not lua_lib or not lua_includes:
         return None
 
-    print('Using Lua library: %s' % lua_l)
-    print('Using Lua include directory: %s' % lua_I)
+    print('Using Lua library: %s' % lua_lib)
+    print('Using Lua include directory: %s' % lua_includes)
 
-    root, ext = os.path.splitext(lua_l)
+    root, ext = os.path.splitext(lua_lib)
     if os.name == 'nt' and ext == '.lib':
-        return dict(extra_objects=[lua_l],
-                    include_dirs=[lua_I],
-                    libfile=lua_l)
-
-    return dict(extra_objects=[lua_l],
-                include_dirs=[lua_I])
+        return dict(extra_objects=[lua_lib],
+                    include_dirs=[lua_includes],
+                    libfile=lua_lib)
+    else:
+        return dict(extra_objects=[lua_lib],
+                    include_dirs=[lua_includes])
 
 def find_lua_build(no_luajit=False):
     # try to find local LuaJIT2 build
@@ -215,12 +215,12 @@ def use_bundled_lua(path, lua_sources, macros):
 
 
 def get_option(name):
-    for i, arg in enumerate(sys.argv):
-        if i == 0:
-            continue # Ignore script name
-        if arg == name and i < len(sys.argv) - 1:
+    for i, arg in enumerate(sys.argv[1:-1], 1):
+        if arg == name:
             sys.argv.pop(i)
             return sys.argv.pop(i)
+    return ""
+
 
 def has_option(name):
     if name in sys.argv[1:]:
@@ -304,9 +304,11 @@ source_extension = ".c"
 if use_cython:
     try:
         import Cython.Compiler.Version
+        import Cython.Compiler.Errors as CythonErrors
         from Cython.Build import cythonize
         print("building with Cython " + Cython.Compiler.Version.version)
         source_extension = ".pyx"
+        CythonErrors.LEVEL = 0
     except ImportError:
         print("WARNING: trying to build with Cython, but it is not installed")
 else:

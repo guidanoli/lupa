@@ -443,7 +443,11 @@ cdef extern from *:
     #define lua_isinteger(L, i) (((void) i), 0)
     #endif
 
-    #if LUA_VERSION_NUM >= 501
+    #if LUA_VERSION_NUM >= 504
+    #define read_lua_version(L)  ((int) lua_version(L))
+    #elif LUA_VERSION_NUM >= 502
+    #define read_lua_version(L)  ((int) *lua_version(L))
+    #elif LUA_VERSION_NUM >= 501
     #define read_lua_version(L)  ((int) LUA_VERSION_NUM)
     #else
     #error Lupa requires at least Lua 5.1 or LuaJIT 2.x
@@ -451,3 +455,15 @@ cdef extern from *:
     """
     int read_lua_version(lua_State *L)
     int lua_isinteger(lua_State *L, int idx)
+
+
+cdef extern from *:
+    # Limits for Lua integers (in Lua<5.3: PTRDIFF_MIN, PTRDIFF_MAX)
+    """
+    #if LUA_VERSION_NUM < 503
+    #define LUA_MAXINTEGER 0
+    #define LUA_MININTEGER 0
+    #endif
+    """
+    lua_Integer LUA_MAXINTEGER
+    lua_Integer LUA_MININTEGER
