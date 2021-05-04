@@ -558,10 +558,12 @@ cdef class LuaRuntime:
         if register_builtins:
             self.register_py_object(b'builtins', b'builtins', builtins)
 
-        # pop 'python' lib
-        lua.lua_pop(L, 1)
+        if self._new_internal_state:
+            lua.lua_pop(L, 1)  # pop 'python' lib
+            return 0           # nothing left to return on the stack
+        else:
+            return 1  # values pushed
 
-        return 0  # nothing left to return on the stack
 
 
 ################################################################################
