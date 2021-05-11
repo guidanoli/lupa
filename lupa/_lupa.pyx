@@ -21,6 +21,7 @@ from cpython.method cimport (
     PyMethod_Check, PyMethod_GET_SELF, PyMethod_GET_FUNCTION)
 from cpython.bytes cimport PyBytes_FromFormat
 from cpython.pycapsule cimport PyCapsule_IsValid, PyCapsule_GetPointer
+from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetObject, PyWeakref_CheckRef
 
 #from libc.stdint cimport uintptr_t
 cdef extern from *:
@@ -73,6 +74,7 @@ except ImportError:
 DEF POBJECT = b"POBJECT" # as used by LunaticPython
 DEF LUPAOFH = b"LUPA_NUMBER_OVERFLOW_CALLBACK_FUNCTION"
 DEF PYREFST = b"LUPA_PYTHON_REFERENCES_TABLE"
+DEF LUAREFST = b"LUPA_LUA_REFERENCES_TABLE"
 
 cdef extern from *:
     """
@@ -498,30 +500,49 @@ cdef class LuaRuntime:
         if overflow_handler is not None and not callable(overflow_handler):
             raise ValueError("overflow_handler must be callable")
         
-        lua.lua_pushlstring(L, LUPAOFH, len(LUPAOFH))
+        check_lua_stack(L, 2)
 
-        if not py_to_lua(self, L, overflow_handler):
+        lua.lua_pushlstring(L, LUPAOFH, len(LUPAOFH)) # key
+
+        if not py_to_lua(self, L, overflow_handler):  # key value
             lua.lua_pop(L, 1)
             raise LuaError("failed to convert overflow_handler")
         
-        lua.lua_rawset(L, lua.LUA_REGISTRYINDEX)
+        lua.lua_rawset(L, lua.LUA_REGISTRYINDEX)      #
 
     @cython.final
     cdef int register_py_object(self, bytes cname, bytes pyname, object obj) except -1:
-        cdef lua_State *L = self._state             # tbl
-        lua.lua_pushlstring(L, cname, len(cname))   # tbl cname
-        if not py_to_lua_custom(self, L, obj, 0):   # tbl cname obj
+        # Assumes the python lib is on the top of the stack
+        cdef lua_State *L = self._state
+        check_lua_stack(L, 4)                        # lib
+        lua.lua_pushlstring(L, cname, len(cname))    # lib cname
+        if not py_to_lua_custom(self, L, obj, 0):    # lib cname obj
             lua.lua_pop(L, 1)
             raise LuaError("failed to convert %s object" % pyname)
-        lua.lua_pushlstring(L, pyname, len(pyname)) # tbl cname obj pyname
-        lua.lua_pushvalue(L, -2)                    # tbl cname obj pyname obj
-        lua.lua_rawset(L, -5)                       # tbl cname obj
-        lua.lua_rawset(L, lua.LUA_REGISTRYINDEX)    # tbl
+        lua.lua_pushlstring(L, pyname, len(pyname))  # lib cname obj pyname
+        lua.lua_pushvalue(L, -2)                     # lib cname obj pyname obj
+        lua.lua_rawset(L, -5)                        # lib cname obj
+        lua.lua_rawset(L, lua.LUA_REGISTRYINDEX)     # lib
+        return 0
+
+    @cython.final
+    cdef int register_weak_table(self, bytes mode, bytes name) except -1:
+        cdef lua_State *L = self._state
+        check_lua_stack(L, 4)                     #
+        lua.lua_pushlstring(L, name, len(name))   # name
+        lua.lua_newtable(L)                       # name tbl
+        lua.lua_createtable(L, 0, 1)              # name tbl metatbl
+        lua.lua_pushlstring(L, mode, len(mode))   # name tbl metatbl mode
+        lua.lua_setfield(L, -2, "__mode")         # name tbl metatbl
+        lua.lua_setmetatable(L, -2)               # name tbl
+        lua.lua_rawset(L, lua.LUA_REGISTRYINDEX)  # 
         return 0
 
     @cython.final
     cdef int init_python_lib(self, bint register_eval, bint register_exec, bint register_builtins) except -1:
         cdef lua_State *L = self._state
+
+        check_lua_stack(L, 2)
 
         # create python lib
         if self._new_internal_state:
@@ -539,13 +560,9 @@ cdef class LuaRuntime:
         luaL_openlib(L, NULL, py_object_lib, 0)
         lua.lua_pop(L, 1)                               # lib 
 
-        # create and store the python references table
-        lua.lua_newtable(L)                                  # lib tbl
-        lua.lua_createtable(L, 0, 1)                         # lib tbl metatbl
-        lua.lua_pushlstring(L, "v", 1)                       # lib tbl metatbl "v"
-        lua.lua_setfield(L, -2, "__mode")                    # lib tbl metatbl
-        lua.lua_setmetatable(L, -2)                          # lib tbl
-        lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, PYREFST)  # lib 
+        # create and store the weak tables
+        self.register_weak_table(b'v', PYREFST)
+        self.register_weak_table(b'k', LUAREFST)
 
         # register global names in the module
         self.register_py_object(b'Py_None',  b'none', None)
@@ -729,6 +746,7 @@ cdef class _LuaObject:
     cdef LuaRuntime _runtime
     cdef lua_State* _state
     cdef int _ref
+    cdef object __weakref__
 
     def __init__(self):
         raise TypeError("Type cannot be instantiated manually")
@@ -737,6 +755,7 @@ cdef class _LuaObject:
         if self._runtime is None:
             return
         cdef lua_State* L = self._state
+        cdef int old_top
         locked = False
         try:
             lock_runtime(self._runtime)
@@ -744,6 +763,18 @@ cdef class _LuaObject:
         except:
             pass
         finally:
+            old_top = lua.lua_gettop(L)
+            try:
+                check_lua_stack(L, 3)
+                lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, LUAREFST)  # weaktbl
+                self.push_lua_object(L)                               # weaktbl val
+                lua.lua_pushnil(L)                                    # weaktbl val nil
+                lua.lua_rawset(L, -3)                                 # weaktbl
+                lua.lua_pop(L, 1)                                     #
+            except MemoryError:
+                pass
+            finally:
+                lua.lua_settop(L, old_top)
             lua.luaL_unref(L, lua.LUA_REGISTRYINDEX, self._ref)
             if locked:
                 unlock_runtime(self._runtime)
@@ -1036,21 +1067,6 @@ cdef _LuaFunction new_lua_function(LuaRuntime runtime, lua_State* L, int n):
 
 @cython.final
 @cython.internal
-@cython.no_gc_clear
-cdef class _LuaCoroutineFunction(_LuaFunction):
-    """A function that returns a new coroutine when called.
-    """
-    def __call__(self, *args):
-        return self.coroutine(*args)
-
-cdef _LuaCoroutineFunction new_lua_coroutine_function(LuaRuntime runtime, lua_State* L, int n):
-    cdef _LuaCoroutineFunction obj = _LuaCoroutineFunction.__new__(_LuaCoroutineFunction)
-    init_lua_object(obj, runtime, L, n)
-    return obj
-
-
-@cython.final
-@cython.internal
 @cython.no_gc_clear   # FIXME: get rid if this
 cdef class _LuaThread(_LuaObject):
     """A Lua thread (coroutine).
@@ -1100,25 +1116,6 @@ cdef _LuaThread new_lua_thread(LuaRuntime runtime, lua_State* L, int n):
     init_lua_object(obj, runtime, L, n)
     obj._co_state = lua.lua_tothread(L, n)
     return obj
-
-
-cdef _LuaObject new_lua_thread_or_function(LuaRuntime runtime, lua_State* L, int n):
-    # this is special - we replace a new (unstarted) thread by its
-    # underlying function to better follow Python's own generator
-    # protocol
-    cdef lua_State* co = lua.lua_tothread(L, n)
-    assert co is not NULL
-    if lua.lua_status(co) == 0 and lua.lua_gettop(co) == 1:
-        # not started yet => get the function and return that
-        lua.lua_pushvalue(co, 1)
-        lua.lua_xmove(co, L, 1)
-        try:
-            return new_lua_coroutine_function(runtime, L, -1)
-        finally:
-            lua.lua_pop(L, 1)
-    else:
-        # already started => wrap the thread
-        return new_lua_thread(runtime, L, n)
 
 
 cdef object resume_lua_thread(_LuaThread thread, tuple args):
@@ -1304,6 +1301,8 @@ cdef object py_from_lua(LuaRuntime runtime, lua_State *L, int n):
     cdef lua.lua_Number number
     cdef lua.lua_Integer integer
     cdef py_object* py_obj
+    cdef object lua_obj
+    cdef int old_top
     cdef int lua_type = lua.lua_type(L, n)
 
     if lua_type == lua.LUA_TNIL:
@@ -1342,18 +1341,47 @@ cdef object py_from_lua(LuaRuntime runtime, lua_State *L, int n):
             if not py_obj.obj:
                 raise ReferenceError("deleted python object")
             return <object>py_obj.obj
-    elif lua_type == lua.LUA_TTABLE:
-        return new_lua_table(runtime, L, n)
-    elif lua_type == lua.LUA_TTHREAD:
-        return new_lua_thread_or_function(runtime, L, n)
-    elif lua_type == lua.LUA_TFUNCTION:
-        py_obj = unpack_wrapped_pyfunction(L, n)
-        if py_obj:
-            if not py_obj.obj:
-                raise ReferenceError("deleted python object")
-            return <object>py_obj.obj
-        return new_lua_function(runtime, L, n)
-    return new_lua_object(runtime, L, n)
+    else:
+        check_lua_stack(L, 4)
+        old_top = lua.lua_gettop(L)
+        try:
+            lua.lua_pushvalue(L, n)                               # val
+            lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, LUAREFST)  # val weaktbl
+            lua.lua_pushvalue(L, -2)                              # val weaktbl val
+            lua.lua_rawget(L, -2)                                 # val weaktbl weaktbl[val]
+            if lua.lua_isnil(L, -1):
+                lua.lua_pop(L, 1)                                 # val weaktbl
+                if lua_type == lua.LUA_TTABLE:
+                    lua_obj = new_lua_table(runtime, L, -2)
+                elif lua_type == lua.LUA_TTHREAD:
+                    lua_obj = new_lua_thread(runtime, L, -2)
+                elif lua_type == lua.LUA_TFUNCTION:
+                    py_obj = unpack_wrapped_pyfunction(L, -2)
+                    if py_obj:
+                        if not py_obj.obj:
+                            raise ReferenceError("deleted python object")
+                        lua_obj = <object>py_obj.obj
+                    else:
+                        lua_obj = new_lua_function(runtime, L, -2)
+                else:
+                    lua_obj = new_lua_object(runtime, L, -2)
+                lua.lua_pushvalue(L, -2)                          # val weaktbl val
+                weakref = PyWeakref_NewRef(lua_obj, None)
+                py_to_lua_custom(runtime, L, weakref, 0)          # val weaktbl val weakref
+                lua.lua_rawset(L, -3)                             # val weaktbl
+                return lua_obj
+            else:
+                py_obj = unpack_userdata(L, -1)                   # val weaktbl udata
+                if not py_obj or not py_obj.obj:
+                    raise ReferenceError("invalid reference to lua object")
+                weakref = <object>py_obj.obj
+                if not PyWeakref_CheckRef(weakref):
+                    raise ReferenceError("reference to lua object is not weak")
+                return <object>PyWeakref_GetObject(weakref)
+        finally:
+            lua.lua_settop(L, old_top)                            #
+
+
 
 cdef py_object* unpack_userdata(lua_State *L, int n) nogil:
     """
