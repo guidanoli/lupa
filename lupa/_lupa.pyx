@@ -231,6 +231,11 @@ cdef class LuaRuntime:
       from the builtins.  Use an ``attribute_filter`` function for that.
       (default: True)
 
+    * ``register_exec``: should Python's ``exec()`` function be available
+      to Lua code as ``python.exec()``?  Note that this does not remove it
+      from the builtins.  Use an ``attribute_filter`` function for that.
+      (default: True)
+
     * ``register_builtins``: should Python's builtins be available to Lua
       code as ``python.builtins.*``?  Note that this does not prevent access
       to the globals available as special Python function attributes, for
