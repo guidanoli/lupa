@@ -182,9 +182,11 @@ cdef class _LuaRuntimeStack:
     """Context handler for the Lua runtime stack"""
     cdef LuaRuntime _runtime
     cdef int _top
+    cdef int _extra
 
     def __enter__(self):
         lock_runtime(self._runtime)
+        check_lua_stack(self._runtime._state, self._extra)
         self._top = lua.lua_gettop(self._runtime._state)
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -352,9 +354,9 @@ cdef class LuaRuntime:
         Ensures 'extra' slots in the stack
         """
         cdef _LuaRuntimeStack ctx
-        check_lua_stack(self._state, extra)
         ctx = _LuaRuntimeStack.__new__(_LuaRuntimeStack)
         ctx._runtime = self
+        ctx._extra = extra
         return ctx
 
     @property
