@@ -454,7 +454,7 @@ cdef class LuaRuntime:
         assert self._state is not NULL
         cdef lua_State *L = self._state
         with self.stack(1):
-            lua.lua_getglobal(L, '_G')
+            lua.lua_pushglobaltable(L)
             if lua.lua_isnil(L, -1):
                 raise LuaError("globals not defined")
             return py_from_lua(self, L, -1)
@@ -2119,7 +2119,7 @@ cdef void luaL_pushmodule(lua_State *L, const char *modname, int size_hint):
     lua.lua_getfield(L, -1, modname)
     if lua.lua_type(L, -1) != lua.LUA_TTABLE:
         lua.lua_pop(L, 1)
-        lua.lua_getglobal(L, '_G')
+        lua.lua_pushglobaltable(L)
         if luaL_findtable(L, 0, modname, size_hint) != NULL:
             lua.luaL_error(L, "name conflict for module '%s'", modname)
         lua.lua_pushvalue(L, -1)
