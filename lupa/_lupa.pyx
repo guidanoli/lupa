@@ -1317,13 +1317,13 @@ cdef int py_to_lua_handle_overflow(LuaRuntime runtime, lua_State *L, object o) e
     check_lua_stack(L, 2)
     lua.lua_pushlstring(L, LUPAOFH, len(LUPAOFH))
     lua.lua_rawget(L, lua.LUA_REGISTRYINDEX)
-    if lua.lua_isnil(L, -1):
-        lua.lua_pop(L, 1)
-        return 0
     nargs = py_to_lua_custom(runtime, L, o, 0)
     if nargs <= 0:
         lua.lua_pop(L, 1)
         return 0
+    if lua.lua_isnil(L, -2):
+        lua.lua_remove(L, -(nargs+1))
+        return nargs
     if lua.lua_pcall(L, nargs, 1, 0):
         lua.lua_pop(L, 1)
         return 0
