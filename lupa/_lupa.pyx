@@ -392,10 +392,7 @@ cdef class LuaRuntime:
         check_lua_stack(L, 1)
         try:
             self._raised_exception = tuple(exc_info())
-            if self._new_internal_state:
-                py_to_lua(self, L, self._raised_exception[1])
-            else:
-                py_to_lua(self, L, "".join(format_exception(*self._raised_exception)))
+            py_to_lua(self, L, self._raised_exception[1])
         except:
             lua.lua_pushlstring(L, lua_error_msg, len(lua_error_msg))
             raise
