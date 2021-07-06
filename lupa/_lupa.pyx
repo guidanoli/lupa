@@ -48,7 +48,7 @@ cdef extern from *:
 
 cdef object exc_info
 from sys import exc_info
-from traceback import format_exception
+from traceback import format_exception_only
 
 cdef object Mapping
 try:
@@ -392,7 +392,10 @@ cdef class LuaRuntime:
         check_lua_stack(L, 1)
         try:
             self._raised_exception = tuple(exc_info())
-            py_to_lua(self, L, self._raised_exception[1])
+            if self._new_internal_state:
+                py_to_lua(self, L, self._raised_exception[1])
+            else:
+                py_to_lua(self, L, format_exception_only(*self._raised_exception[:2])[-1].strip())
         except:
             lua.lua_pushlstring(L, lua_error_msg, len(lua_error_msg))
             raise
@@ -565,6 +568,10 @@ cdef class LuaRuntime:
         lua.lua_pushlightuserdata(L, <void*>self)       # lib udata
         lua.lua_pushcclosure(L, py_args, 1)             # lib function
         lua.lua_setfield(L, -2, "args")                 # lib 
+
+        lua.lua_pushlightuserdata(L, <void*>self)       # lib udata
+        lua.lua_pushcclosure(L, py_exc_info, 1)         # lib function
+        lua.lua_setfield(L, -2, "exc_info")             # lib 
 
         # register our own object metatable
         lua.luaL_newmetatable(L, POBJECT)               # lib metatbl
@@ -1540,7 +1547,7 @@ cdef int py_tuple_to_lua(LuaRuntime runtime, lua_State *L,
                             tuple args, bint first_may_be_nil=True) except -1:
     """Converts the args tuple into Lua values, pushed onto stack
     If first_may_be_nil is False and the first argument is None,
-    it is converted to nil, not to python.none
+    it is wrapped instead of being converted to nil
     """
     cdef int i
     if args:
@@ -2061,6 +2068,31 @@ cdef int py_set_overflow_handler(lua_State* L) nogil:
     lua.lua_settop(L, 1)                                 # hdl
     lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, LUPAOFH)  #
     return 0
+
+# exception information getter
+
+cdef int py_exc_info_with_gil(PyObject* runtime_obj, lua_State* L) with gil:
+    cdef LuaRuntime runtime
+    try:
+        runtime = <LuaRuntime?>runtime_obj
+        exc_info = runtime._raised_exception
+        if exc_info is None:
+            return 0
+        py_tuple_to_lua(runtime, L, exc_info)
+        return 3
+    except:
+        try: runtime.store_raised_exception(L, b'error while calling python.exc_info()')
+        finally: return -1
+
+cdef int py_exc_info(lua_State* L) nogil:
+    cdef PyObject* runtime
+    runtime = <PyObject*>lua.lua_touserdata(L, lua.lua_upvalueindex(1))
+    if not runtime:
+        return lua.luaL_error(L, "missing runtime")
+    result = py_exc_info_with_gil(runtime, L)
+    if result < 0:
+        return lua.lua_error(L) # never returns!
+    return result
 
 # 'python' module functions in Lua
 
