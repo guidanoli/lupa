@@ -578,6 +578,10 @@ cdef class LuaRuntime:
         self.register_weak_table(b'v', PYREFST)
         self.register_weak_table(b'k', LUAREFST)
 
+        # register Lua error in the module
+        py_to_lua(self, L, LuaError)
+        lua.lua_setfield(L, -2, "lua_error")
+
         # register global names in the module
         self.register_py_object(b'Py_None',  b'none', None)
         if register_eval:
@@ -2065,7 +2069,7 @@ cdef int py_set_overflow_handler(lua_State* L) nogil:
     lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, LUPAOFH)  #
     return 0
 
-# exception information getter
+# protected call to Python functions from Lua
 
 cdef int py_pcall_with_gil(lua_State* L, py_object* py_obj) with gil:
     cdef LuaRuntime runtime = None
@@ -2078,14 +2082,18 @@ cdef int py_pcall_with_gil(lua_State* L, py_object* py_obj) with gil:
             runtime._state = L
         try:
             nret = call_python(runtime, L, py_obj)
-        except BaseException as e:
+        except BaseException:
             lua.lua_pushboolean(L, 0)
-            py_tuple_to_lua(runtime, L, <tuple>exc_info())
-            return 4
+            exc_type, exc_obj, traceback = exc_info()
+            py_to_lua(runtime, L, exc_type)
+            py_to_lua(runtime, L, exc_obj)
+            py_to_lua(runtime, L, traceback)
+            return 4  # false, exc_type, exc_obj, traceback
         else:
+            check_lua_stack(L, 1)
             lua.lua_pushboolean(L, 1)
             lua.lua_insert(L, -nret-1)
-            return nret + 1
+            return nret + 1  # true, ...
     except:
         try: runtime.store_raised_exception(L, b'error during Python protected call')
         finally: return -1

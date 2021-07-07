@@ -2964,6 +2964,12 @@ class TestPythonProtectedCall(SetupLuaRuntimeMixin, unittest.TestCase):
         exc = self.pcall_error(eval, '0/0')
         self.assertIsInstance(exc, ZeroDivisionError)
 
+    def test_with_lua_error(self):
+        def foo(): raise lupa.LuaError('xyz')
+        exc = self.pcall_error(foo)
+        self.assertIsInstance(exc, lupa.LuaError)
+        self.assertEqual(str(exc), 'xyz')
+
     def test_without_error_with_many_return_values(self):
         ret = self.pcall_ok(lambda n: tuple(range(n)), 3)
         self.assertEqual(ret, (0, 1, 2))
@@ -2975,6 +2981,28 @@ class TestPythonProtectedCall(SetupLuaRuntimeMixin, unittest.TestCase):
     def test_without_error_without_return(self):
         ret = self.pcall_ok(lambda: None)
         self.assertIsNone(ret)
+
+
+################################################################################
+# tests for Lua error Python object wrapped to Lua
+
+class TestLuaErrorInLua(SetupLuaRuntimeMixin, unittest.TestCase):
+    def check_lua_error(self, function, *args):
+        self.lua.eval('''function(f, ...)
+            ok, exc_type, exc_obj, tb = python.pcall(f, ...)
+            assert(not ok, "Function didn't raise an error")
+            assert(exc_type == python.lua_error, "Error type is not " .. tostring(python.lua_error) .. ", it is " .. tostring(exc_type))
+            assert(python.builtins.isinstance(exc_obj, python.lua_error), "Error is not of LuaError type, but " .. tostring(exc_obj))
+        end''')(function, *args)
+    
+    def test_raise_from_python(self):
+        def foo(): raise lupa.LuaError('xyz')
+        self.check_lua_error(foo)
+
+    def test_raise_from_lua(self):
+        def raiser(o): raise o
+        foo = self.lua.eval('function(raise) raise(python.lua_error("xyz")) end')
+        self.assertRaises(lupa.LuaError, foo, raiser)
 
 
 if __name__ == '__main__':
