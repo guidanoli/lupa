@@ -2934,6 +2934,49 @@ class TestLuaObjectEquality(SetupLuaRuntimeMixin, unittest.TestCase):
         self.check_eq('coroutine.create(function() end)')
 
 
+################################################################################
+# tests for protected calls to Python functions from Lua
+
+class TestPythonProtectedCall(SetupLuaRuntimeMixin, unittest.TestCase):
+    def pcall_error(self, function, *args):
+        pcall = self.lua.eval('python.pcall')
+        ok, exc_type, exc_obj, traceback = pcall(function, *args)
+        self.assertFalse(ok)
+        self.assertTrue(issubclass(exc_type, BaseException))
+        self.assertIsInstance(exc_obj, BaseException)
+        self.assertIsInstance(exc_obj, exc_type)
+        return exc_obj
+
+    def pcall_ok(self, function, *args):
+        pcall = self.lua.eval('python.pcall')
+        returns = pcall(function, *args)
+        self.assertIsInstance(returns, tuple)
+        ok = returns[0]
+        self.assertIsInstance(ok, bool)
+        self.assertTrue(ok)
+        others = returns[1:]
+        if len(others) == 1:
+            return others[0]
+        else:
+            return others
+
+    def test_with_error(self):
+        exc = self.pcall_error(eval, '0/0')
+        self.assertIsInstance(exc, ZeroDivisionError)
+
+    def test_without_error_with_many_return_values(self):
+        ret = self.pcall_ok(lambda n: tuple(range(n)), 3)
+        self.assertEqual(ret, (0, 1, 2))
+
+    def test_without_error_with_one_return_value(self):
+        ret = self.pcall_ok(eval, '123')
+        self.assertEqual(ret, 123)
+
+    def test_without_error_without_return(self):
+        ret = self.pcall_ok(lambda: None)
+        self.assertIsNone(ret)
+
+
 if __name__ == '__main__':
     def print_version():
         version = lupa.LuaRuntime().lua_implementation
