@@ -261,6 +261,24 @@ class TestLuaRuntime(SetupLuaRuntimeMixin, unittest.TestCase):
         lua = lupa.LuaRuntime(register_eval=False)
         self.assertEqual(True, lua.eval('python.eval == nil'))
 
+    def test_python_exec(self):
+        lua_exec = self.lua.eval('function() return python.exec end')()
+        local_scope = dict(y=3, z=7)
+        lua_exec('x = y * 5 + z', locals=local_scope)
+        self.assertEqual(local_scope['x'], 22)
+
+    def test_python_exec_disabled(self):
+        lua = lupa.LuaRuntime(register_exec=False)
+        self.assertEqual(True, lua.eval('python.exec == nil'))
+
+    def test_python_lua_error(self):
+        function = self.lua.eval('function() return python.LuaError end')
+        self.assertEqual(lupa.LuaError, function())
+
+    def test_python_lua_error_disabled(self):
+        lua = lupa.LuaRuntime(register_lua_error=False)
+        self.assertEqual(True, lua.eval('python.LuaError == nil'))
+
     def test_len_table_array(self):
         table = self.lua.eval('{1,2,3,4,5}')
         self.assertEqual(5, len(table))
@@ -2932,6 +2950,77 @@ class TestLuaObjectEquality(SetupLuaRuntimeMixin, unittest.TestCase):
         self.check_eq('{}')
         self.check_eq('function() end')
         self.check_eq('coroutine.create(function() end)')
+
+
+################################################################################
+# tests for protected calls to Python functions from Lua
+
+class TestPythonProtectedCall(SetupLuaRuntimeMixin, unittest.TestCase):
+    def pcall_error(self, function, *args):
+        pcall = self.lua.eval('python.pcall')
+        ok, exc_type, exc_obj, traceback = pcall(function, *args)
+        self.assertFalse(ok)
+        self.assertTrue(issubclass(exc_type, BaseException))
+        self.assertIsInstance(exc_obj, BaseException)
+        self.assertIsInstance(exc_obj, exc_type)
+        return exc_obj
+
+    def pcall_ok(self, function, *args):
+        pcall = self.lua.eval('python.pcall')
+        returns = pcall(function, *args)
+        self.assertIsInstance(returns, tuple)
+        ok = returns[0]
+        self.assertIsInstance(ok, bool)
+        self.assertTrue(ok)
+        others = returns[1:]
+        if len(others) == 1:
+            return others[0]
+        else:
+            return others
+
+    def test_with_error(self):
+        exc = self.pcall_error(eval, '0/0')
+        self.assertIsInstance(exc, ZeroDivisionError)
+
+    def test_with_lua_error(self):
+        def foo(): raise lupa.LuaError('xyz')
+        exc = self.pcall_error(foo)
+        self.assertIsInstance(exc, lupa.LuaError)
+        self.assertEqual(str(exc), 'xyz')
+
+    def test_without_error_with_many_return_values(self):
+        ret = self.pcall_ok(lambda n: tuple(range(n)), 3)
+        self.assertEqual(ret, (0, 1, 2))
+
+    def test_without_error_with_one_return_value(self):
+        ret = self.pcall_ok(eval, '123')
+        self.assertEqual(ret, 123)
+
+    def test_without_error_without_return(self):
+        ret = self.pcall_ok(lambda: None)
+        self.assertIsNone(ret)
+
+
+################################################################################
+# tests for Lua error Python object wrapped to Lua
+
+class TestLuaErrorInLua(SetupLuaRuntimeMixin, unittest.TestCase):
+    def check_lua_error(self, function, *args):
+        self.lua.eval('''function(f, ...)
+            ok, exc_type, exc_obj, tb = python.pcall(f, ...)
+            assert(not ok, "Function didn't raise an error")
+            assert(exc_type == python.LuaError, "Error type is not " .. tostring(python.LuaError) .. ", it is " .. tostring(exc_type))
+            assert(python.builtins.isinstance(exc_obj, python.LuaError), "Error is not of LuaError type, but " .. tostring(exc_obj))
+        end''')(function, *args)
+    
+    def test_raise_from_python(self):
+        def foo(): raise lupa.LuaError('xyz')
+        self.check_lua_error(foo)
+
+    def test_raise_from_lua(self):
+        def raiser(o): raise o
+        foo = self.lua.eval('function(raise) raise(python.LuaError("xyz")) end')
+        self.assertRaises(lupa.LuaError, foo, raiser)
 
 
 if __name__ == '__main__':
