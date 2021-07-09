@@ -261,6 +261,24 @@ class TestLuaRuntime(SetupLuaRuntimeMixin, unittest.TestCase):
         lua = lupa.LuaRuntime(register_eval=False)
         self.assertEqual(True, lua.eval('python.eval == nil'))
 
+    def test_python_exec(self):
+        lua_exec = self.lua.eval('function() return python.exec end')()
+        local_scope = dict(y=3, z=7)
+        lua_exec('x = y * 5 + z', locals=local_scope)
+        self.assertEqual(local_scope['x'], 22)
+
+    def test_python_exec_disabled(self):
+        lua = lupa.LuaRuntime(register_exec=False)
+        self.assertEqual(True, lua.eval('python.exec == nil'))
+
+    def test_python_lua_error(self):
+        function = self.lua.eval('function() return python.LuaError end')
+        self.assertEqual(lupa.LuaError, function())
+
+    def test_python_lua_error_disabled(self):
+        lua = lupa.LuaRuntime(register_lua_error=False)
+        self.assertEqual(True, lua.eval('python.LuaError == nil'))
+
     def test_len_table_array(self):
         table = self.lua.eval('{1,2,3,4,5}')
         self.assertEqual(5, len(table))
@@ -2991,8 +3009,8 @@ class TestLuaErrorInLua(SetupLuaRuntimeMixin, unittest.TestCase):
         self.lua.eval('''function(f, ...)
             ok, exc_type, exc_obj, tb = python.pcall(f, ...)
             assert(not ok, "Function didn't raise an error")
-            assert(exc_type == python.lua_error, "Error type is not " .. tostring(python.lua_error) .. ", it is " .. tostring(exc_type))
-            assert(python.builtins.isinstance(exc_obj, python.lua_error), "Error is not of LuaError type, but " .. tostring(exc_obj))
+            assert(exc_type == python.LuaError, "Error type is not " .. tostring(python.LuaError) .. ", it is " .. tostring(exc_type))
+            assert(python.builtins.isinstance(exc_obj, python.LuaError), "Error is not of LuaError type, but " .. tostring(exc_obj))
         end''')(function, *args)
     
     def test_raise_from_python(self):
@@ -3001,7 +3019,7 @@ class TestLuaErrorInLua(SetupLuaRuntimeMixin, unittest.TestCase):
 
     def test_raise_from_lua(self):
         def raiser(o): raise o
-        foo = self.lua.eval('function(raise) raise(python.lua_error("xyz")) end')
+        foo = self.lua.eval('function(raise) raise(python.LuaError("xyz")) end')
         self.assertRaises(lupa.LuaError, foo, raiser)
 
 
