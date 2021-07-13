@@ -271,14 +271,6 @@ class TestLuaRuntime(SetupLuaRuntimeMixin, unittest.TestCase):
         lua = lupa.LuaRuntime(register_exec=False)
         self.assertEqual(True, lua.eval('python.exec == nil'))
 
-    def test_python_lua_error(self):
-        function = self.lua.eval('function() return python.LuaError end')
-        self.assertEqual(lupa.LuaError, function())
-
-    def test_python_lua_error_disabled(self):
-        lua = lupa.LuaRuntime(register_lua_error=False)
-        self.assertEqual(True, lua.eval('python.LuaError == nil'))
-
     def test_python_tuple(self):
         self.assertEqual(self.lua.eval('python.tuple()'), ())
         self.assertEqual(self.lua.eval('python.tuple(1)'), (1, ))
