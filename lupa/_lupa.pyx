@@ -257,10 +257,6 @@ cdef class LuaRuntime:
       example.  Use an ``attribute_filter`` function for that.
       (default: True, new in Lupa 1.2)
 
-    * ``register_lua_error``: should the ``lupa.LuaError`` type be available
-      to Lua code as ``python.LuaError``?  Note that it could still be obtained
-      elsewhere inside Lua.  (default: True)
-
     * ``unpack_returned_tuples``: should Python tuples be unpacked in Lua?
       If ``py_fun()`` returns ``(1, 2, 3)``, then does ``a, b, c = py_fun()``
       give ``a == 1 and b == 2 and c == 3`` or does it give
@@ -308,7 +304,7 @@ cdef class LuaRuntime:
                   attribute_filter=None, attribute_handlers=None,
                   bint register_eval=True, bint unpack_returned_tuples=False,
                   bint register_builtins=True, bint register_exec=True,
-                  bint register_lua_error=True, overflow_handler=None, state=None):
+                  overflow_handler=None, state=None):
         cdef lua_State* L
         cdef const char *capsule_name = "lua_State"
         if state is None:
@@ -351,7 +347,7 @@ cdef class LuaRuntime:
             lua.lua_atpanic(L, <lua.lua_CFunction>lupa_panic)
             lua.luaL_openlibs(L)
 
-        self.init_python_lib(register_eval, register_exec, register_builtins, register_lua_error)
+        self.init_python_lib(register_eval, register_exec, register_builtins)
         self.set_overflow_handler(overflow_handler)
 
     def __dealloc__(self):
@@ -551,7 +547,7 @@ cdef class LuaRuntime:
 
     @cython.final
     cdef int init_python_lib(self, bint register_eval, bint register_exec,
-                             bint register_builtins, bint register_lua_error) except -1:
+                             bint register_builtins) except -1:
         cdef lua_State *L = self._state
 
         check_lua_stack(L, 4)
@@ -604,8 +600,6 @@ cdef class LuaRuntime:
             self.register_py_object(b'exec', exec_wrapper if self._new_state else exec_main)
         if register_builtins:
             self.register_py_object(b'builtins', builtins)
-        if register_lua_error:
-            self.register_py_object(b'LuaError', LuaError)
 
         if self._new_state:
             lua.lua_pop(L, 1)  # pop 'python' lib
@@ -2258,8 +2252,14 @@ cdef int get_object_length_from_lua(lua_State* L) nogil:
     lua.lua_pushlightuserdata(L, <void*>length)  # obj length
     return 1
 
-cdef int lupa_panic(lua_State* L):
-    """Lua panic function"""
-    print("unprotected error in call to Lua API", file=stderr)
+
+cdef int lupa_panic_with_gil(lua_State* L) with gil:
+    """Lua panic function with GIL"""
+    print("Unprotected error in call to Lua API", file=stderr)
     print_stack()
+
+
+cdef int lupa_panic(lua_State* L) nogil:
+    """Lua panic function"""
+    lupa_panic_with_gil(L)
     return 0
