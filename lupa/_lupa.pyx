@@ -538,6 +538,7 @@ cdef class LuaRuntime:
     cdef int init_python_lib(self, bint register_eval, bint register_exec,
                              bint register_builtins) except -1:
         cdef lua_State *L = self._state
+        cdef int nup = 1
 
         check_lua_stack(L, 4)
 
@@ -546,10 +547,11 @@ cdef class LuaRuntime:
 
         # create python lib
         if self._new_state:
-            luaL_openlib(L, "python", py_lib, 1)        # lib
+            luaL_openlib(L, "python", py_lib, nup)      # lib
         else:
             lua.lua_createtable(L, 0, libsize(py_lib))  # self lib
-            luaL_setfuncs(L, py_lib, 1)                 # 
+            lua.lua_insert(L, -(nup + 1))               # lib self
+            luaL_setfuncs(L, py_lib, nup)               # lib
 
         # register our own object metatable
         lua.luaL_newmetatable(L, POBJECT)               # lib metatbl
