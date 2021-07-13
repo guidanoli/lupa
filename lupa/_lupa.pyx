@@ -535,33 +535,21 @@ cdef class LuaRuntime:
         return 0
 
     @cython.final
-    cdef int register_function_with_luart(self, bytes name, lua.lua_CFunction function):
-        # Assumes the python lib is on the top of the stack
-        cdef lua_State* L = self._state
-        check_lua_stack(L, 2)                      # lib
-        lua.lua_pushlstring(L, name, len(name))    # lib name
-        lua.lua_pushlightuserdata(L, <void*>self)  # lib name udata
-        lua.lua_pushcclosure(L, function, 1)       # lib name function
-        lua.lua_rawset(L, -3)                      # lib
-        return 0
-
-    @cython.final
     cdef int init_python_lib(self, bint register_eval, bint register_exec,
                              bint register_builtins) except -1:
         cdef lua_State *L = self._state
 
         check_lua_stack(L, 4)
 
+        # push upvalues for python lib
+        lua.lua_pushlightuserdata(L, <void*>self)       # self
+
         # create python lib
         if self._new_state:
-            luaL_openlib(L, "python", py_lib, 0)        # lib
+            luaL_openlib(L, "python", py_lib, 1)        # lib
         else:
-            lua.lua_createtable(L, 0, libsize(py_lib))  # lib
-            luaL_setfuncs(L, py_lib, 0)
-
-        # register functions with LuaRuntime as upvalue
-        self.register_function_with_luart(b'args', py_args)
-        self.register_function_with_luart(b'tuple', py_tuple)
+            lua.lua_createtable(L, 0, libsize(py_lib))  # self lib
+            luaL_setfuncs(L, py_lib, 1)                 # 
 
         # register our own object metatable
         lua.luaL_newmetatable(L, POBJECT)               # lib metatbl
@@ -2135,6 +2123,38 @@ cdef int py_tuple(lua_State* L) nogil:
         return lua.lua_error(L) # never returns!
     return result
 
+# type checking for Python objects in Lua
+
+cdef int py_is_exc_info_with_gil(lua_State* L, py_object* py_obj) with gil:
+    cdef LuaRuntime runtime = None
+    try:
+        runtime = <LuaRuntime?>py_obj.runtime
+        obj = <object>py_obj.obj
+        lua.lua_pushboolean(L, isinstance(obj, _PyException))
+        return 1
+    except:
+        return py_to_lua_error(runtime, L, b'error checking if object is exception info')
+
+cdef int py_is_exc_info(lua_State* L) nogil:
+    cdef py_object* py_obj = unpack_userdata(L, 1)
+    if not py_obj:
+        lua.lua_pushboolean(L, 0)
+        return 1
+    result = py_is_exc_info_with_gil(L, py_obj)
+    if result < 0:
+        return lua.lua_error(L) # never returns!
+    return result
+
+cdef int py_is_object(lua_State* L) nogil:
+    cdef py_object* py_obj
+    if lua.lua_isuserdata(L, 1):
+        py_obj = unpack_userdata(L, 1)
+    else:
+        py_obj = unpack_wrapped_pyfunction(L, 1)
+    lua.lua_pushboolean(L, py_obj != NULL)
+    return 1
+
+
 # 'python' module functions in Lua
 
 cdef lua.luaL_Reg *py_lib = [
@@ -2145,6 +2165,10 @@ cdef lua.luaL_Reg *py_lib = [
     lua.luaL_Reg(name = "iterex",               func = <lua.lua_CFunction> py_iterex),
     lua.luaL_Reg(name = "enumerate",            func = <lua.lua_CFunction> py_enumerate),
     lua.luaL_Reg(name = "set_overflow_handler", func = <lua.lua_CFunction> py_set_overflow_handler),
+    lua.luaL_Reg(name = "is_exc_info",          func = <lua.lua_CFunction> py_is_exc_info),
+    lua.luaL_Reg(name = "is_object",            func = <lua.lua_CFunction> py_is_object),
+    lua.luaL_Reg(name = "args",                 func = <lua.lua_CFunction> py_args),
+    lua.luaL_Reg(name = "tuple",                func = <lua.lua_CFunction> py_tuple),
     lua.luaL_Reg(name = NULL, func = NULL),
 ]
 

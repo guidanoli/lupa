@@ -2978,6 +2978,7 @@ class TestLuaErrorToPython(SetupLuaRuntimeMixin, unittest.TestCase):
         code = '''
             local ok, err = pcall(python.eval, "0/0")
             assert(not ok, "expected to raise an error")
+            assert(python.is_exc_info(err), "expected exception info")
             error(err)
         '''
         self.assertRaises(ZeroDivisionError, self.lua.execute, code)
@@ -3006,10 +3007,42 @@ class TestPythonErrorToLua(SetupLuaRuntimeMixin, unittest.TestCase):
     def test_other_exceptions(self):
         ok, ret = self.pcall(self.raiseme, Exception, 'abc')
         self.assertFalse(ok)
+        self.assertTrue(self.lua.eval('python.is_exc_info')(ret))
         self.assertEqual(ret.etype, Exception)
         self.assertIsInstance(ret.value, Exception)
         self.assertEqual(ret.value.args, ('abc',))
         self.assertIsNotNone(ret.traceback)
+
+################################################################################
+# tests for checking Python objects in Lua
+
+class TestIsPythonObjectInLua(SetupLuaRuntimeMixin, unittest.TestCase):
+    def test_is_object(self):
+        self.lua.execute('''
+        for _, object in ipairs{
+            42,
+            false,
+            "spam",
+            function() end,
+            coroutine.create(function() end),
+            {1, 2, 3},
+        } do
+            if python.is_object(object) then
+                error(tostring(object) .. ' is not a Python object')
+            end
+        end
+        assert(not python.is_object(nil))
+        for _, object in ipairs{
+            python.none,
+            python.builtins,
+            python.eval,
+            python.as_function(python.eval),
+        } do
+            if not python.is_object(object) then
+                error(tostring(object) .. ' is a Python object')
+            end
+        end
+        ''')
 
 if __name__ == '__main__':
     def print_version():
